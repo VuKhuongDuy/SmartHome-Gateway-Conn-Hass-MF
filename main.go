@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -13,11 +14,11 @@ import (
 )
 
 var (
-	nc           *nats.Conn
-	messages     chan []byte
-	sub          *nats.Subscription
-	agentNaChnl  string
-	exportNaChnl string
+	nc            *nats.Conn
+	messages      chan *nats.Msg
+	sub           *nats.Subscription
+	agentNatTopic string
+	exportNaChnl  string
 )
 
 type ChanConfig struct {
@@ -42,52 +43,82 @@ type Route struct {
 func init() {
 	var err error
 	godotenv.Load(".env")
-	agentNaChnl = "channels/" + getAgentNatChnl() + "/messages/services/#"
-	exportNaChnl = getExportNatChnl()
 
 	nc, err = nats.Connect("localhost:4222")
 	if err != nil {
 		log.Fatalf(fmt.Sprintf("Connect to NAT error: : %s", err))
 	}
 
-	messages = make(chan []byte, 100)
-	sub, err = nc.SubscribeSync(agentNaChnl)
+	agentNatTopic = "commands.>"
+
+	messages = make(chan *nats.Msg, 100)
+	sub, err = nc.SubscribeSync(agentNatTopic)
 	check(err)
 }
 
 func main() {
-	go subscribeNat(agentNaChnl)
+	go subscribeNat(agentNatTopic)
 	transferToNat()
 }
 
 func subscribeNat(chann string) {
 	defer sub.Unsubscribe()
-	fmt.Println("Begin subscribe NAT at topic " + chann)
+	fmt.Println("Begin subscribe NAT at topic: " + chann)
 	for {
 		m, err := sub.NextMsg(1000 * time.Millisecond)
 		if err == nil && m.Data != nil {
-			fmt.Println("Message: ", string(m.Data))
-			messages <- m.Data
+			fmt.Println("Message Data: ", m.Data)
+			fmt.Println("Message Subject: ", m.Subject)
+			fmt.Println("Message Reply: ", m.Reply)
+
+			hassApi, method := getApiHass(m.Subject)
+			body := getBody(m.Data)
+			sendToHass(hassApi, method)
+
+			messages <- m
 		}
 	}
+}
+
+func sendToHass(api string, method string) {
+
+}
+
+func getApiHass(str string) (string, string) {
+	arr := strings.Split(str, ".")
+	index := -1
+	for i, v := range arr {
+		if v == "hass" {
+			index = i
+		}
+	}
+	return strings.Join(arr[(index+1):], "/"), arr[index]
+}
+
+func getBody(data []byte) {
+
 }
 
 func transferToNat() {
 	for {
 		select {
 		case msg := <-messages:
-			msgStr := string(msg)
-			fmt.Println("Message: " + msgStr)
-			publishNat(exportNaChnl, msgStr)
+			arr := strings.Split(msg.Subject, ".")
+			newStr := strings.Join(arr[1:], ".")
+			publishNat(fmt.Sprintf("export.%s", newStr), msg)
 		default:
-			fmt.Println("Waitting message nat.")
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(1000 * time.Millisecond)
 		}
 	}
 }
 
-func publishNat(chann string, mesg string) {
-	nc.Publish(chann, []byte(mesg))
+func publishNat(chann string, mesg *nats.Msg) {
+	ec, _ := nats.NewEncodedConn(nc, nats.JSON_ENCODER)
+	err := ec.Publish(chann, &nats.Msg{
+		Data:    []byte("hello"),
+		Subject: "/sdfasf/asfas",
+	})
+	fmt.Println(err)
 }
 
 func getAgentNatChnl() string {
